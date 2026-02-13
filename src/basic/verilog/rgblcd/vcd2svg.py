@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vcd2svg.py — Generate SVG timing diagrams from VCD simulation output.
+vcd2svg.py — Generate SVG + PDF timing diagrams from VCD simulation output.
 
 Zero external dependencies — uses only Python 3 stdlib.
 
@@ -8,14 +8,17 @@ Usage:
     python3 vcd2svg.py <vcd_file> [options]
 
 Options:
-    --output-dir DIR    Write SVGs to DIR (default: same dir as VCD file)
+    --output-dir DIR    Write outputs to DIR (default: same dir as VCD file)
     --list              List all signals in VCD file and exit
     --views V1,V2,...   Comma-separated view names to generate (default: all)
+    --svg-only          Skip PDF generation
 """
 
 import sys
 import os
 import re
+import zlib
+import xml.etree.ElementTree as ET
 from bisect import bisect_right
 
 # =============================================================================
@@ -477,6 +480,238 @@ def esc(text):
 
 
 # =============================================================================
+# PDF Writer — pure Python, zero dependencies
+# =============================================================================
+
+def _pdf_escape(s):
+    """Escape a string for a PDF text object."""
+    # Replace non-latin-1 chars (e.g. em-dash U+2014) with ASCII equivalents
+    s = s.replace('\u2014', '--').replace('\u2013', '-')
+    s = s.replace('\u2018', "'").replace('\u2019', "'")
+    s = s.replace('\u201c', '"').replace('\u201d', '"')
+    return s.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+
+
+def _hex_to_rgb01(h):
+    """Convert '#rrggbb' to (r, g, b) floats in 0..1."""
+    h = h.lstrip('#')
+    if len(h) == 3:
+        h = h[0]*2 + h[1]*2 + h[2]*2
+    return (int(h[0:2], 16) / 255,
+            int(h[2:4], 16) / 255,
+            int(h[4:6], 16) / 255)
+
+
+class PDFWriter:
+    """
+    Minimal PDF 1.4 writer.  Supports pages with stream content only.
+    Uses Courier (built-in Type 1, monospace — matches SVG font-family).
+    """
+
+    def __init__(self):
+        self._objects = []   # list of bytes objects (PDF indirect objects)
+        self._pages = []     # list of (page_obj_id, width_pt, height_pt)
+
+    # ---- low-level helpers ----
+
+    def _add_obj(self, data):
+        """Add an indirect object; returns its 1-based id."""
+        self._objects.append(data)
+        # IDs 1..4 are reserved for catalog/pages/fonts, so offset by 4
+        return len(self._objects) + 4
+
+    # ---- public API ----
+
+    def add_page(self, stream, width_pt, height_pt):
+        """
+        Add a page.  *stream* is an uncompressed PDF content stream (str).
+        """
+        # Encode to latin-1, replacing non-latin-1 chars (e.g. em-dash)
+        # with a safe ASCII substitute.
+        raw = stream.encode('latin-1', errors='replace')
+        compressed = zlib.compress(raw)
+        stream_id = self._add_obj(
+            b'<< /Length ' + str(len(compressed)).encode() +
+            b' /Filter /FlateDecode >>\nstream\n' +
+            compressed + b'\nendstream'
+        )
+        page_id = self._add_obj(
+            f'<< /Type /Page /Parent 2 0 R '
+            f'/MediaBox [0 0 {width_pt:.2f} {height_pt:.2f}] '
+            f'/Contents {stream_id} 0 R '
+            f'/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> >>'
+            .encode()
+        )
+        self._pages.append((page_id, width_pt, height_pt))
+
+    def write(self, filename):
+        """Write the assembled PDF to *filename*."""
+        # Object slots 1..4 are reserved:
+        #   1=Catalog, 2=Pages, 3=Font(Courier), 4=Font(Courier-Bold)
+        catalog = b'<< /Type /Catalog /Pages 2 0 R >>'
+        kids = ' '.join(f'{pid} 0 R' for pid, _, _ in self._pages)
+        pages = (f'<< /Type /Pages /Kids [{kids}] '
+                 f'/Count {len(self._pages)} >>').encode()
+        font_regular = b'<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>'
+        font_bold = (b'<< /Type /Font /Subtype /Type1 '
+                     b'/BaseFont /Courier-Bold >>')
+
+        all_objs = [catalog, pages, font_regular, font_bold] + self._objects
+
+        buf = b'%PDF-1.4\n%\xe2\xe3\xcf\xd3\n'
+        offsets = []
+        for i, obj in enumerate(all_objs):
+            offsets.append(len(buf))
+            buf += f'{i+1} 0 obj\n'.encode()
+            buf += obj + b'\nendobj\n'
+
+        xref_offset = len(buf)
+        buf += f'xref\n0 {len(all_objs)+1}\n'.encode()
+        buf += b'0000000000 65535 f \n'
+        for off in offsets:
+            buf += f'{off:010d} 00000 n \n'.encode()
+        buf += (f'trailer\n<< /Size {len(all_objs)+1} /Root 1 0 R >>\n'
+                f'startxref\n{xref_offset}\n%%EOF\n').encode()
+
+        with open(filename, 'wb') as f:
+            f.write(buf)
+
+
+def svg_to_pdf(svg_path, pdf_path):
+    """
+    Convert one of our generated SVGs to a single-page PDF.
+
+    Only handles the SVG elements emitted by SVGTimingDiagram:
+    rect, line, text, path (M/L), polygon.
+    """
+    tree = ET.parse(svg_path)
+    root = tree.getroot()
+
+    w = float(root.get('width', '1400'))
+    h = float(root.get('height', '400'))
+    # PDF uses points; our SVG pixels map 1:1 to PDF points.
+    # PDF y-axis is bottom-up, so we flip: pdf_y = h - svg_y
+
+    # Scale factor for Courier glyph widths (approximate).
+    # Courier at size S has glyph width = 0.6 * S.
+    COURIER_WIDTH_FACTOR = 0.6
+
+    ops = []  # PDF content stream operations
+
+    def flip(y):
+        return h - y
+
+    def set_stroke(color, width=1):
+        r, g, b = _hex_to_rgb01(color)
+        ops.append(f'{r:.3f} {g:.3f} {b:.3f} RG')
+        ops.append(f'{width} w')
+
+    def set_fill(color):
+        r, g, b = _hex_to_rgb01(color)
+        ops.append(f'{r:.3f} {g:.3f} {b:.3f} rg')
+
+    for elem in root.iter():
+        tag = elem.tag.split('}')[-1]  # strip namespace
+
+        if tag == 'rect':
+            rx = float(elem.get('x', '0'))
+            ry = float(elem.get('y', '0'))
+            rw = float(elem.get('width', '0'))
+            rh = float(elem.get('height', '0'))
+            fill = elem.get('fill', '#ffffff')
+            set_fill(fill)
+            ops.append(f'{rx:.2f} {flip(ry + rh):.2f} '
+                       f'{rw:.2f} {rh:.2f} re f')
+
+        elif tag == 'line':
+            x1 = float(elem.get('x1', '0'))
+            y1 = float(elem.get('y1', '0'))
+            x2 = float(elem.get('x2', '0'))
+            y2 = float(elem.get('y2', '0'))
+            stroke = elem.get('stroke', '#000000')
+            sw = float(elem.get('stroke-width', '1'))
+            set_stroke(stroke, sw)
+            ops.append(f'{x1:.2f} {flip(y1):.2f} m '
+                       f'{x2:.2f} {flip(y2):.2f} l S')
+
+        elif tag == 'path':
+            d = elem.get('d', '')
+            stroke = elem.get('stroke', '#000000')
+            sw = float(elem.get('stroke-width', '1'))
+            set_stroke(stroke, sw)
+            # Parse M/L commands (the only ones we emit)
+            tokens = d.replace(',', ' ').split()
+            i = 0
+            while i < len(tokens):
+                cmd = tokens[i]
+                if cmd in ('M', 'm'):
+                    x, y = float(tokens[i+1]), float(tokens[i+2])
+                    ops.append(f'{x:.2f} {flip(y):.2f} m')
+                    i += 3
+                elif cmd in ('L', 'l'):
+                    x, y = float(tokens[i+1]), float(tokens[i+2])
+                    ops.append(f'{x:.2f} {flip(y):.2f} l')
+                    i += 3
+                else:
+                    # Might be implicit L coords
+                    try:
+                        x, y = float(tokens[i]), float(tokens[i+1])
+                        ops.append(f'{x:.2f} {flip(y):.2f} l')
+                        i += 2
+                    except (ValueError, IndexError):
+                        i += 1
+            ops.append('S')  # stroke the path
+
+        elif tag == 'polygon':
+            pts_str = elem.get('points', '')
+            fill = elem.get('fill', '#ffffff')
+            stroke = elem.get('stroke', '#000000')
+            sw = float(elem.get('stroke-width', '1'))
+            coords = pts_str.replace(',', ' ').split()
+            if len(coords) >= 4:
+                set_fill(fill)
+                set_stroke(stroke, sw)
+                x0, y0 = float(coords[0]), float(coords[1])
+                ops.append(f'{x0:.2f} {flip(y0):.2f} m')
+                for j in range(2, len(coords), 2):
+                    xp, yp = float(coords[j]), float(coords[j+1])
+                    ops.append(f'{xp:.2f} {flip(yp):.2f} l')
+                ops.append('b')  # close, fill and stroke
+
+        elif tag == 'text':
+            tx = float(elem.get('x', '0'))
+            ty = float(elem.get('y', '0'))
+            anchor = elem.get('text-anchor', 'start')
+            fill = elem.get('fill', '#000000')
+            fsize = float(elem.get('font-size', '11'))
+            bold = 'bold' in elem.get('font-weight', '')
+            text = (elem.text or '').strip()
+            if not text:
+                continue
+
+            font_tag = '/F2' if bold else '/F1'
+            set_fill(fill)
+            # Adjust x for text-anchor
+            text_w = len(text) * COURIER_WIDTH_FACTOR * fsize
+            if anchor == 'middle':
+                tx -= text_w / 2
+            elif anchor == 'end':
+                tx -= text_w
+
+            # PDF text baseline: SVG y is roughly at the baseline already;
+            # nudge down slightly since PDF Td is baseline-relative.
+            ops.append('BT')
+            ops.append(f'{font_tag} {fsize:.1f} Tf')
+            ops.append(f'{tx:.2f} {flip(ty):.2f} Td')
+            ops.append(f'({_pdf_escape(text)}) Tj')
+            ops.append('ET')
+
+    pdf = PDFWriter()
+    pdf.add_page('\n'.join(ops), w, h)
+    pdf.write(pdf_path)
+
+
+# =============================================================================
 # View definitions — customise these for your design
 # =============================================================================
 #
@@ -737,6 +972,8 @@ def main():
         views = [v for v in views if v['name'] in selected]
 
     renderer = SVGTimingDiagram()
+    svg_only = '--svg-only' in sys.argv
+    svg_files = []
 
     for view in views:
         out = os.path.join(output_dir, f'{view["name"]}.svg')
@@ -750,6 +987,13 @@ def main():
             width=view.get('width', 1400),
         )
         print(f'  -> {out}')
+        svg_files.append(out)
+
+    if not svg_only:
+        for svg_path in svg_files:
+            pdf_path = svg_path.rsplit('.', 1)[0] + '.pdf'
+            svg_to_pdf(svg_path, pdf_path)
+            print(f'  -> {pdf_path}')
 
     print('Done.')
 
