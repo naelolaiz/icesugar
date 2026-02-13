@@ -1,0 +1,51 @@
+name: rgblcd – test & waveforms
+
+on:
+  push:
+    paths:
+      - 'src/basic/verilog/rgblcd/**'
+      - '.github/workflows/rgblcd.yml'
+  pull_request:
+    paths:
+      - 'src/basic/verilog/rgblcd/**'
+      - '.github/workflows/rgblcd.yml'
+  workflow_dispatch:
+
+jobs:
+  test-and-waveforms:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/basic/verilog/rgblcd
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run testbench
+        run: |
+          iverilog -g2012 -o test.vvp test_lcd.v lcd.v
+          vvp test.vvp
+
+      - name: Generate waveforms (SVG + PDF)
+        run: python3 vcd2svg.py test_lcd.vcd --output-dir waveforms
+
+      - name: Upload waveform PDFs
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgblcd-waveforms-pdf
+          path: src/basic/verilog/rgblcd/waveforms/*.pdf
+
+      - name: Upload waveform SVGs
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgblcd-waveforms-svg
+          path: src/basic/verilog/rgblcd/waveforms/*.svg
