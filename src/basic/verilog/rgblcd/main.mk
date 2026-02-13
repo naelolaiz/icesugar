@@ -43,6 +43,14 @@ test: $(TEST_SRC) $(ADD_SRC)
 waveforms: test
 	$(PODMAN) python3 vcd2svg.py test_lcd.vcd --output-dir waveforms
 
+schematic: $(ADD_SRC)
+	@mkdir -p schematic
+	$(PODMAN) sh -c "\
+		yosys -p 'read_verilog -sv $(ADD_SRC); proc; opt; clean; \
+			show -format dot -prefix schematic/lcd_rtl -colors 1 -notitle' && \
+		dot -Tsvg schematic/lcd_rtl.dot -o schematic/lcd_rtl.svg && \
+		dot -Tpdf schematic/lcd_rtl.dot -o schematic/lcd_rtl.pdf"
+
 prog: $(PROJ).bin
 	$(PODMAN_DEV) icesprog $<
 
@@ -52,7 +60,7 @@ sudo-prog: $(PROJ).bin
 
 clean:
 	rm -f $(PROJ).blif $(PROJ).asc $(PROJ).rpt $(PROJ).bin $(PROJ).json $(PROJ).log $(ADD_CLEAN) test.vvp test_lcd.vcd test_lcd.vvp
-	rm -rf waveforms
+	rm -rf waveforms schematic
 
 .SECONDARY:
-.PHONY: all prog test waveforms clean
+.PHONY: all prog test waveforms schematic clean

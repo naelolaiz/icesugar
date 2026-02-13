@@ -22,8 +22,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Icarus Verilog
-        run: sudo apt-get update && sudo apt-get install -y iverilog
+      - name: Install Icarus Verilog, Yosys & Graphviz
+        run: sudo apt-get update && sudo apt-get install -y iverilog yosys graphviz
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,6 +38,13 @@ jobs:
       - name: Generate waveforms (SVG + PDF)
         run: python3 vcd2svg.py test_lcd.vcd --output-dir waveforms
 
+      - name: Generate RTL schematic (SVG + PDF)
+        run: |
+          mkdir -p schematic
+          yosys -p 'read_verilog -sv lcd.v; proc; opt; clean; show -format dot -prefix schematic/lcd_rtl -colors 1 -notitle'
+          dot -Tsvg schematic/lcd_rtl.dot -o schematic/lcd_rtl.svg
+          dot -Tpdf schematic/lcd_rtl.dot -o schematic/lcd_rtl.pdf
+
       - name: Upload waveform PDFs
         uses: actions/upload-artifact@v4
         with:
@@ -49,3 +56,11 @@ jobs:
         with:
           name: rgblcd-waveforms-svg
           path: src/basic/verilog/rgblcd/waveforms/*.svg
+
+      - name: Upload RTL schematic
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgblcd-schematic
+          path: |
+            src/basic/verilog/rgblcd/schematic/*.svg
+            src/basic/verilog/rgblcd/schematic/*.pdf
