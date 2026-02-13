@@ -40,6 +40,9 @@ endif
 test: $(TEST_SRC) $(ADD_SRC)
 	$(PODMAN) sh -c "iverilog -g2012 -o test.vvp $(TEST_SRC) $(ADD_SRC) && vvp test.vvp"
 
+waveforms: test
+	$(PODMAN) python3 vcd2svg.py test_lcd.vcd --output-dir waveforms
+
 prog: $(PROJ).bin
 	$(PODMAN_DEV) icesprog $<
 
@@ -49,6 +52,7 @@ sudo-prog: $(PROJ).bin
 
 clean:
 	rm -f $(PROJ).blif $(PROJ).asc $(PROJ).rpt $(PROJ).bin $(PROJ).json $(PROJ).log $(ADD_CLEAN) test.vvp test_lcd.vcd test_lcd.vvp
+	rm -rf waveforms
 
 .SECONDARY:
-.PHONY: all prog test clean
+.PHONY: all prog test waveforms clean

@@ -14,6 +14,7 @@ podman run --rm \
            docker.io/davidsiaw/yosys-docker:latest \
     sh -c "iverilog -g2012 -o test_lcd.vvp test_lcd.v lcd.v && \
            vvp test_lcd.vvp && \
+           python3 vcd2svg.py test_lcd.vcd --output-dir waveforms && \
            yosys -p 'synth_ice40 -top TOP -json top.json' top.v lcd.v && \
            nextpnr-ice40 --up5k --package sg48 --json top.json --pcf top.pcf --asc top.asc && \
            icepack top.asc top.bin && \
