@@ -104,17 +104,20 @@ module LCDC
     localparam hfp    = 16'd2;    // Horizontal front porch: 2 blank pixels after
                                   //   visible area before next HSYNC.
 
-    // Total width/height of a full scan line / frame (visible + blanking).
-    // The counters x and y will wrap around at these values.
-    localparam xmax = hact + hbp + hfp;   // = 480 + 43 + 2 = 525 pixel clocks per line
-    localparam ymax = vact + vbp + vfp;   // = 272 + 12 + 1 = 285 lines per frame
+    // Maximum counter values for x and y.  x counts 0..xmax inclusive
+    // (xmax+1 = 526 pixel clocks per line); y counts 0..ymax inclusive
+    // (but y==ymax is a transient state that resets immediately).
+    localparam xmax = hact + hbp + hfp;   // = 480 + 43 + 2 = 525 (last x value in a line)
+    localparam ymax = vact + vbp + vfp;   // = 272 + 12 + 1 = 285 (last y value in a frame)
 
     // =====================================================================
     //  SECTION 2 — PIXEL / LINE COUNTERS
     // =====================================================================
     // On every rising edge of pclk, we increment x.
-    // When x reaches the end of a line (xmax), we reset x and increment y.
-    // When y reaches the end of a frame (ymax), we reset both to 0.
+    // When x reaches xmax, we reset x to 0 and increment y.
+    // When y reaches ymax (checked only when x is NOT xmax), we reset
+    // both to 0.  Note: since the x==xmax check has priority, y==ymax
+    // is only processed once x wraps back to 0 on the next cycle.
     // This produces a raster scan: left→right, top→bottom, repeating.
     //
     // "always @(posedge pclk or negedge rst)" means:
@@ -152,15 +155,18 @@ module LCDC
     // DE is HIGH only when we are inside the visible pixel rectangle.
     // =====================================================================
 
-    // HSYNC: active (LOW) while x is in [0 .. hpulse-1].
-    // Outside that range it's HIGH (idle).  The panel sees the LOW→HIGH
-    // transition and knows "a new line is starting."
+    // HSYNC: LOW (active) during the back-porch and active regions,
+    // i.e. when x is in [hpulse .. xmax-hfp] = [1 .. 523].
+    // HIGH during the sync pulse (x=0) and front porch (x=524..525).
     assign LCD_HSYNC = ((x >= hpulse) && (x <= (xmax - hfp))) ? 1'b0 : 1'b1;
 
-    // VSYNC: same idea vertically.
+    // VSYNC: LOW when y is in [vpulse .. ymax] = [1 .. 285].
+    // HIGH only at y=0 (the sync pulse line).
     assign LCD_VSYNC = ((y >= vpulse) && (y <= (ymax - 0)))    ? 1'b0 : 1'b1;
 
-    // DE (Data Enable): HIGH only when we are inside the visible 480x272 area.
+    // DE (Data Enable): HIGH only inside the visible area.
+    // Horizontal: x in [hbp .. xmax-hfp] = [43 .. 523] → 481 pixels wide.
+    // Vertical:   y in [vbp .. ymax-vfp-1] = [12 .. 283] → 272 lines.
     // The panel ignores R/G/B values whenever DE is LOW.
     assign LCD_DE    = ((x >= hbp) && (x <= xmax - hfp) &&
                         (y >= vbp) && (y <= ymax - vfp - 1))   ? 1'b1 : 1'b0;
@@ -175,14 +181,18 @@ module LCDC
     // "wire" means these are just wires — no storage. They continuously
     // reflect (x - hbp) and (y - vbp) in real time.
     // =====================================================================
-    wire [15:0] px = x - hbp;   // px: 0 = left edge,  479 = right edge
-    wire [15:0] py = y - vbp;   // py: 0 = top  edge,  271 = bottom edge
+    wire [15:0] px = x - hbp;   // px: 0 = left edge,  480 = right edge (481 pixels)
+    wire [15:0] py = y - vbp;   // py: 0 = top  edge,  271 = bottom edge (272 lines)
 
     // =====================================================================
     //  SECTION 5 — FRAME COUNTER (animation timer)
     // =====================================================================
     // We want things to move over time.  frame_cnt increments by 1 every
     // frame (~60 Hz).  We detect "start of frame" by checking x==0 && y==0.
+    //
+    // IMPORTANT: the very first clock after reset also has x==0 && y==0,
+    // so frame_cnt (and ball positions) update immediately on the first
+    // posedge after reset is released — there is no "frame 0" idle state.
     //
     // 24 bits can count up to 16 777 215 frames — at 60 fps that's ~77 hours
     // before it wraps around (which is fine; wrapping just restarts the

@@ -43,9 +43,12 @@ module test_lcd;
     localparam ymax   = vact + vbp + vfp; // 285
 
     // x counts 0..xmax inclusive, so one line = xmax+1 clocks.
-    // y counts 0..ymax, but y==ymax lasts only 1 clock before wrapping.
-    localparam line_clks  = xmax + 1;            // 526
-    localparam frame_clks = ymax * line_clks + 1; // 149911
+    // y counts 0..ymax; y==ymax is reached when x wraps from xmax to 0,
+    // then on the next cycle the y==ymax branch resets both to (0,0).
+    localparam line_clks  = xmax + 1;             // 526 clocks per line
+    // A full frame = ymax lines of line_clks each, plus the 1 extra clock
+    // where y==ymax before it wraps back to (0,0).
+    localparam frame_clks = ymax * line_clks + 1; // 149911 clocks per frame
 
     // ---- Clock generation: 10ns period (100 MHz, but period is arbitrary for test) ----
     initial pclk = 0;
