@@ -1,0 +1,71 @@
+name: rgblcd – test & waveforms
+
+on:
+  push:
+    paths:
+      - 'src/basic/verilog/rgblcd/**'
+      - '.github/workflows/rgblcd.yml'
+  pull_request:
+    paths:
+      - 'src/basic/verilog/rgblcd/**'
+      - '.github/workflows/rgblcd.yml'
+  workflow_dispatch:
+
+jobs:
+  test-and-waveforms:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/basic/verilog/rgblcd
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog & Yosys
+        run: sudo apt-get update && sudo apt-get install -y iverilog yosys librsvg2-bin
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Run testbench
+        run: |
+          iverilog -g2012 -o test.vvp test_lcd.v lcd.v
+          vvp test.vvp
+
+      - name: Generate waveforms (SVG + PDF)
+        run: python3 vcd2svg.py test_lcd.vcd --output-dir waveforms
+
+      - name: Generate RTL schematic (SVG + PDF)
+        run: |
+          mkdir -p schematic
+          yosys -p 'read_verilog -sv lcd.v; proc; opt; clean; write_json schematic/lcd_rtl.json'
+          npx --yes netlistsvg schematic/lcd_rtl.json -o schematic/lcd_schematic.svg
+          rsvg-convert -f pdf schematic/lcd_schematic.svg -o schematic/lcd_schematic.pdf
+
+      - name: Upload waveform PDFs
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgblcd-waveforms-pdf
+          path: src/basic/verilog/rgblcd/waveforms/*.pdf
+
+      - name: Upload waveform SVGs
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgblcd-waveforms-svg
+          path: src/basic/verilog/rgblcd/waveforms/*.svg
+
+      - name: Upload RTL schematic
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgblcd-schematic
+          path: |
+            src/basic/verilog/rgblcd/schematic/*.svg
+            src/basic/verilog/rgblcd/schematic/*.pdf
