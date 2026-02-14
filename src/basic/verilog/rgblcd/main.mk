@@ -45,11 +45,14 @@ waveforms: test
 
 schematic: $(ADD_SRC)
 	@mkdir -p schematic
-	$(PODMAN) sh -c "\
-		yosys -p 'read_verilog -sv $(ADD_SRC); proc; opt; clean; \
-			show -format dot -prefix schematic/lcd_rtl -colors 1 -notitle' && \
-		dot -Tsvg schematic/lcd_rtl.dot -o schematic/lcd_rtl.svg && \
-		dot -Tpdf schematic/lcd_rtl.dot -o schematic/lcd_rtl.pdf"
+	$(PODMAN) yosys -p 'read_verilog -sv $(ADD_SRC); proc; opt; clean; write_json schematic/lcd_rtl.json'
+	$(PODMAN_NODE) sh -c "\
+		apt-get update -qq >/dev/null 2>&1 && \
+		apt-get install -y -qq librsvg2-bin >/dev/null 2>&1 && \
+		npx --yes netlistsvg schematic/lcd_rtl.json \
+			-o schematic/lcd_schematic.svg && \
+		rsvg-convert -f pdf schematic/lcd_schematic.svg \
+			-o schematic/lcd_schematic.pdf"
 
 prog: $(PROJ).bin
 	$(PODMAN_DEV) icesprog $<
